@@ -1,0 +1,1710 @@
+using System.Security;
+using System;
+using System.Xml;
+using System.Security.Cryptography;
+using System.Xml.Linq;
+using System.Net;
+using System.Text.Json.Serialization;
+using System.Text.Json;
+namespace AndroidAnalysis.ManifestData
+{
+
+    public class ManifestAnalysis
+    {
+
+        public Dictionary<string, object> GetManifestData(string xmlPath)
+        {
+            List<ManifestDescription> ret_list = [];
+            string ns = "android";
+            XmlDocument doc = new();
+            doc.Load(xmlPath);  // Load your AndroidManifest.xml file here
+            ManifestDataExtractor manifestDataExtractor = new();
+            var man_data_dic = manifestDataExtractor.ManifestData(doc);
+            XmlNodeList manifest = doc.GetElementsByTagName("manifest");
+            XmlNodeList action = doc.GetElementsByTagName("action");
+            XmlNodeList activity = doc.GetElementsByTagName("activity");
+            XmlNodeList activityAlias = doc.GetElementsByTagName("activity-alias");
+            XmlNodeList application = doc.GetElementsByTagName("application");
+            XmlNodeList compatibleScreens = doc.GetElementsByTagName("compatible-screens");
+            XmlNodeList dataTags = doc.GetElementsByTagName("data");
+            XmlNodeList grantUriPermission = doc.GetElementsByTagName("grant-uri-permission");
+            XmlNodeList instrumentation = doc.GetElementsByTagName("instrumentation");
+            XmlNodeList intentFilter = doc.GetElementsByTagName("intent-filter");
+            XmlNodeList metaData = doc.GetElementsByTagName("meta-data");
+            XmlNodeList pathPermission = doc.GetElementsByTagName("path-permission");
+            XmlNodeList permissions = doc.GetElementsByTagName("permission");
+            XmlNodeList permissionGroup = doc.GetElementsByTagName("permission-group");
+            XmlNodeList permissionTree = doc.GetElementsByTagName("permission-tree");
+            XmlNodeList provider = doc.GetElementsByTagName("provider");
+            XmlNodeList receiver = doc.GetElementsByTagName("receiver");
+            XmlNodeList service = doc.GetElementsByTagName("service");
+            XmlNodeList supportsGlTexture = doc.GetElementsByTagName("supports-gl-texture");
+            XmlNodeList supportsScreens = doc.GetElementsByTagName("supports-screens");
+            XmlNodeList usesConfiguration = doc.GetElementsByTagName("uses-configuration");
+            XmlNodeList usesFeature = doc.GetElementsByTagName("uses-feature");
+            XmlNodeList usesLibrary = doc.GetElementsByTagName("uses-library");
+            XmlNodeList usesNativeLibrary = doc.GetElementsByTagName("uses-native-library");
+            XmlNodeList usesPermission = doc.GetElementsByTagName("uses-permission");
+            XmlNodeList usespermissiondk23 = doc.GetElementsByTagName("uses-permission-sdk-23");
+            XmlNodeList usesSdk = doc.GetElementsByTagName("uses-sdk");
+
+            // var
+            Dictionary<string, string> permission_dict = [];
+            string min_sdk = string.Empty;
+            string target_sdk = string.Empty;
+            List<string> exported = [];
+            var exp_count = new Dictionary<string, int>{
+                                { "act", 0 },
+                                { "ser", 0 },
+                                { "bro", 0 },
+                                { "cnt", 0 }
+                            };
+
+            #region PERMISSION
+            foreach (XmlElement item in permissions)
+            {
+                string protectionLevel;
+                if (item.HasAttributes)
+                {
+                    protectionLevel = item.GetAttribute($"{ns}:protectionLevel");
+                    if (!string.IsNullOrEmpty(protectionLevel))
+                    {
+                        if (protectionLevel == "0x00000000") protectionLevel = "normal";
+                        if (protectionLevel == "0x00000001") protectionLevel = "dangerous";
+                        if (protectionLevel == "0x00000002") protectionLevel = "signature";
+                        if (protectionLevel == "0x00000003") protectionLevel = "signatureOrSystem";
+                    }
+                    permission_dict.Add(item.GetAttribute($"{ns}:name"), protectionLevel);
+                }
+                else
+                {
+                    protectionLevel = "normal";
+                    permission_dict.Add(item.GetAttribute("name"), protectionLevel);
+                }
+            }
+            #endregion PERMISSION
+            #region GENERAL
+            foreach (XmlElement item in usesSdk)
+            {
+                min_sdk = item.GetAttribute($"{ns}:minSdkVersion");
+                target_sdk = item.GetAttribute($"{ns}:targetSdkVersion");
+                if (!string.IsNullOrEmpty(min_sdk))
+                {
+                    try
+                    {
+                        if (AndroidConstants.ANDROID_8_0_LEVEL > Convert.ToInt32(min_sdk))
+                        {
+                            AndroidConstants.ANDROID_API_LEVEL_MAP.TryGetValue(min_sdk, out string androidVersion);
+                            if (string.IsNullOrEmpty(androidVersion)) androidVersion = "XX";
+                            ret_list.Add(new("vulnerable_os_version", [androidVersion, min_sdk, "", "", ""]));
+                        }
+                        else if (Convert.ToInt32(min_sdk) < AndroidConstants.ANDROID_10_0_LEVEL)
+                        {
+                            AndroidConstants.ANDROID_API_LEVEL_MAP.TryGetValue(min_sdk, out string androidVersion);
+                            if (string.IsNullOrEmpty(androidVersion)) androidVersion = "XX";
+                            ret_list.Add(new("vulnerable_os_version2", [androidVersion, min_sdk, "", "", ""]));
+                        }
+                    }
+                    catch (Exception) { }
+                }
+            }
+
+            #endregion GENERAL 
+            bool backupDisabled = false;
+            List<browsable_activities> browsable_Activities = new List<browsable_activities>();
+            //Dictionary<string, Dictionary<string, object>> browsable_activities = new Dictionary<string, Dictionary<string, object>>();
+
+            #region APPLICATIONS Handle multiple application tags in AAR
+            foreach (XmlElement applic in application)
+            {
+
+                bool perm_appl_level_exists = false;
+                bool debuggable = false;
+                string do_netsec = string.Empty;
+                string perm_appl_level = string.Empty;
+                #region application level
+                if (applic.HasAttributes && !string.IsNullOrEmpty(applic.GetAttribute($"{ns}:permission")))
+                {
+                    perm_appl_level = applic.GetAttribute($"{ns}:permission");
+                    perm_appl_level_exists = true;
+                }
+                if (applic.GetAttribute($"{ns}:usesCleartextTraffic") == "true") ret_list.Add(new("clear_text_traffic", ["", "", "", "", ""]));
+                if (applic.GetAttribute($"{ns}:directBootAware") == "true") ret_list.Add(new("direct_boot_aware", ["", "", "", "", ""]));
+                if (!string.IsNullOrEmpty(applic.GetAttribute($"{ns}:networkSecurityConfig")))
+                {
+                    do_netsec = applic.GetAttribute($"{ns}:networkSecurityConfig");
+                    ret_list.Add(new("has_network_security", [do_netsec, "", "", "", ""]));
+                }
+                if (applic.GetAttribute($"{ns}:debuggable") == "true")
+                {
+                    debuggable = true;
+                    ret_list.Add(new("app_is_debuggable", ["", "", "", "", ""]));
+                }
+                if (applic.GetAttribute($"{ns}:allowBackup") == "true")
+                {
+                    ret_list.Add(new("app_allowbackup", ["", "", "", "", ""]));
+                }
+                if (applic.GetAttribute($"{ns}:allowBackup") == "true") backupDisabled = true;
+                if (!backupDisabled)
+                {
+                    ret_list.Add(new("allowbackup_not_set", ["", "", "", "", ""]));
+                }
+                if (applic.GetAttribute($"{ns}:testOnly") == "true")
+                {
+                    ret_list.Add(new("app_in_test_mode", ["", "", "", "", ""]));
+                }
+                foreach (XmlElement node in applic.ChildNodes)
+                {
+                    string an_or_a = "";
+                    string itemname = "";
+                    string cnt_id = "";
+                    string item = "";
+
+                    switch (node.Name)
+                    {
+                        case "activity":
+                            itemname = "Activity";
+                            cnt_id = "act";
+                            an_or_a = "n";
+                            break;
+                        case "activity-alias":
+                            itemname = "Activity-Alias";
+                            cnt_id = "act";
+                            an_or_a = "n";
+                            break;
+                        case "provider":
+                            itemname = "Content Provider";
+                            cnt_id = "cnt";
+                            break;
+                        case "receiver":
+                            itemname = "Broadcast Receiver";
+                            cnt_id = "bro";
+                            break;
+                        case "service":
+                            itemname = "Service";
+                            cnt_id = "ser";
+                            break;
+                        default:
+                            itemname = "NIL";
+                            cnt_id = "";
+                            break;
+                    }
+                    // Checks for Activities
+                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                    {
+                        item = node.GetAttribute($"{ns}:name");
+                        // Browsable Activities
+                        var browse_dictionary = GetBrowsableActivities(node, ns);
+                        if (browse_dictionary.ContainsKey("browsable"))
+                        {
+                            browsable_Activities.Add(new browsable_activities()
+                            {
+                                key = item,
+                                properties = browse_dictionary
+                            });
+                        }
+                        // Task Affinity
+                        string task_affinity = node.GetAttribute($"{ns}:taskAffinity");
+                        if (!string.IsNullOrEmpty(task_affinity))
+                        {
+                            ret_list.Add(new("task_affinity_set", [item, "", "", "", ""]));
+                        }
+                        //LaunchMode
+                        bool affected_sdk = true;
+                        try
+                        {
+                            affected_sdk = Convert.ToInt32(min_sdk) < AndroidConstants.ANDROID_5_0_LEVEL;
+                        }
+                        catch (Exception) { }
+                        string launchmode = node.GetAttribute($"{ns}:launchMode");
+                        if (affected_sdk && new[] { "singleTask", "singleInstance" }.Contains(launchmode))
+                        {
+                            ret_list.Add(new("non_standard_launchmode", [item, "", "", "", ""]));
+                        }
+                        //Android Task Hijacking or StrandHogg 1.0
+                        int tartgetSdk;
+                        try
+                        {
+                            tartgetSdk = Convert.ToInt32(target_sdk);
+                        }
+                        catch (Exception)
+                        {
+                            try
+                            {
+                                tartgetSdk = Convert.ToInt32(min_sdk);
+                            }
+                            catch (Exception)
+                            {
+                                tartgetSdk = AndroidConstants.ANDROID_8_0_LEVEL;
+                            }
+                        }
+                        if (tartgetSdk < AndroidConstants.ANDROID_9_0_LEVEL && launchmode == "singleTask")
+                        {
+                            ret_list.Add(new("task_hijacking", [item, item, target_sdk, "", ""]));
+                        }
+
+                        //Android StrandHogg 2.0
+                        string exported_act = node.GetAttribute($"{ns}:exported");
+                        if (tartgetSdk < AndroidConstants.ANDROID_10_0_LEVEL && exported_act == "true" && (launchmode != "singleInstance" || launchmode != ""))
+                        {
+                            ret_list.Add(new("task_hijacking2", [item, item, target_sdk, "", ""]));
+                        }
+                    }
+
+                    //Exported Check
+                    item = "";
+                    string protlevel = "";
+                    bool is_inf = false;
+                    bool is_perm_exist = false;
+                    bool prot_level_exist = false;
+                    //the existence of a permission at the component level that
+                    if (itemname != "NIL")
+                    {
+                        string perm = "";
+                        string prot = "";
+
+                        if (node.GetAttribute($"{ns}:exported") == "true")
+                        {
+                            item = node.GetAttribute($"{ns}:name");
+                            if (!string.IsNullOrEmpty(node.GetAttribute($"{ns}:permission")))
+                            {
+                                perm = $"<strong>Permission: </strong> {node.GetAttribute($"{ns}:permission")}";
+                                is_perm_exist = true;
+                            }
+                            try
+                            {
+                                if (item != man_data_dic["mainactivity"])
+                                {
+                                    if (is_perm_exist)
+                                    {
+                                        prot = "";
+                                        if (permission_dict.ContainsKey(node.GetAttribute($"{ns}:permission")))
+                                        {
+                                            prot = $"<strong>protectionLevel: </strong> {permission_dict[node.GetAttribute($"{ns}:permission")]}";
+                                            prot_level_exist = true;
+                                            protlevel = permission_dict[node.GetAttribute($"{ns}:permission")];
+                                        }
+                                        if (!string.IsNullOrEmpty(protlevel))
+                                        {
+                                            if (protlevel == "normal")
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_normal", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                {
+                                                    exported.Add(item);
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                            }
+                                            else if (protlevel == "dangerous")
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_dangerous", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                {
+                                                    exported.Add(item);
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                            }
+                                            else if (protlevel == "signature")
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_signature", [itemname, item, perm + prot, an_or_a, itemname]));
+
+                                            }
+                                            else if (protlevel == "signatureOrSystem")
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_signature", [itemname, item, perm + prot, an_or_a, itemname]));
+
+                                            }
+                                        }
+                                        else
+                                        {
+                                            ret_list.Add(new("exported_protected_permission_not_defined", [itemname, item, perm, an_or_a, itemname]));
+                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                            {
+                                                exported.Add(item);
+                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        //perm_appl_level_exists = false;
+                                        if (!perm_appl_level_exists)
+                                        {
+                                            ret_list.Add(new("explicitly_exported", [itemname, item, perm, an_or_a, itemname]));
+                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                            {
+                                                exported.Add(item);
+                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            perm = "<strong>Permission: </strong>" + perm_appl_level;
+                                            if (permission_dict.ContainsKey(perm_appl_level))
+                                            {
+                                                perm = "<strong>protectionLevel: </strong>" + permission_dict[perm_appl_level];
+                                                prot_level_exist = true;
+                                                protlevel = permission_dict[perm_appl_level];
+                                            }
+                                            if (prot_level_exist)
+                                            {
+                                                if (protlevel == "normal")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_normal_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "dangerous")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_dangerous_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "signature")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                                else if (protlevel == "signatureOrSystem")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_signatureorsystem_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                            }
+                                            else
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                {
+                                                    exported.Add(item);
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception) { }
+                        }
+
+                        else if (node.GetAttribute($"{ns}:exported") == "false")
+                        {
+
+                            XmlNodeList intentfilters = node.ChildNodes;
+                            foreach (XmlNode i in intentfilters)
+                            {
+                                if (i.Name == "intent-filter")
+                                {
+                                    is_inf = true;
+                                }
+                            }
+                            if (is_inf)
+                            {
+                                item = node.GetAttribute($"{ns}:name");
+                                if (!string.IsNullOrEmpty(node.GetAttribute($"{ns}:permission")))
+                                {
+                                    perm = "<strong>protectionLevel: </strong>" + node.GetAttribute($"{ns}:permission");
+                                    is_perm_exist = true;
+                                }
+                                if (item != man_data_dic["mainactivity"])
+                                {
+                                    if (is_perm_exist)
+                                    {
+                                        prot = "";
+                                        if (permission_dict.ContainsKey(node.GetAttribute($"{ns}:permission")))
+                                        {
+                                            prot = "<strong>protectionLevel: </strong>" + node.GetAttribute($"{ns}:permission");
+                                            prot_level_exist = true;
+                                            protlevel = permission_dict[node.GetAttribute($"{ns}:permission")];
+                                            if (prot_level_exist)
+                                            {
+                                                if (protlevel == "normal")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_normal", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "dangerous")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_dangerous", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "signature")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_signature", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                                else if (protlevel == "signatureOrSystem")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_signatureorsystem", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            ret_list.Add(new("exported_protected_permission_not_defined", [itemname, item, perm + prot, an_or_a, itemname]));
+                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                            {
+                                                exported.Add(item);
+                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (!perm_appl_level_exists)
+                                        {
+                                            ret_list.Add(new("exported_intent_filter_exists", [itemname, item, perm + prot, an_or_a, itemname]));
+                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                            {
+                                                exported.Add(item);
+                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            perm = "<strong>protectionLevel: </strong>" + perm_appl_level;
+                                            prot = "";
+                                            if (permission_dict.ContainsKey(perm_appl_level))
+                                            {
+                                                prot = "<strong>protectionLevel: </strong>" + permission_dict[perm_appl_level];
+                                                prot_level_exist = true;
+                                                protlevel = permission_dict[perm_appl_level];
+
+                                            }
+                                            if (prot_level_exist)
+                                            {
+                                                if (protlevel == "normal")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_normal_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "dangerous")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_dangerous_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                    {
+                                                        exported.Add(item);
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else if (protlevel == "signature")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                                else if (protlevel == "signatureOrSystem")
+                                                {
+                                                    ret_list.Add(new("exported_protected_permission_signatureorsystem_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                }
+                                            }
+                                            else
+                                            {
+                                                ret_list.Add(new("exported_protected_permission_app_level", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                {
+                                                    exported.Add(item);
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    if (man_data_dic.ContainsKey("min_sdk") && man_data_dic.ContainsKey("target_sdk") && Convert.ToInt32(min_sdk) < AndroidConstants.ANDROID_4_2_LEVEL)
+                                    {
+                                        if (itemname == "Content Provider" && Convert.ToInt32(min_sdk) < AndroidConstants.ANDROID_4_2_LEVEL)
+                                        {
+                                            perm = "";
+                                            item = node.GetAttribute($"{ns}:name");
+                                            if (!string.IsNullOrEmpty(node.GetAttribute($"{ns}:permission")))
+                                            {
+                                                perm = "<strong>Permission: </strong>" + node.GetAttribute($"{ns}:permission");
+                                                is_perm_exist = true;
+                                            }
+                                            if (is_perm_exist)
+                                            {
+                                                perm = "";
+                                                if (permission_dict.ContainsKey("permission"))
+                                                {
+                                                    perm = "<strong>protectionLevel: </strong>" + permission_dict[node.GetAttribute($"{ns}:permission")];
+                                                    is_perm_exist = true;
+                                                    protlevel = permission_dict[node.GetAttribute($"{ns}:permission")];
+                                                }
+
+                                                if (prot_level_exist)
+                                                {
+                                                    if (protlevel == "normal")
+                                                    {
+                                                        ret_list.Add(new("exported_provider_normal", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                        {
+                                                            exported.Add(item);
+                                                            exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                        }
+                                                    }
+                                                    else if (protlevel == "dangerous")
+                                                    {
+                                                        ret_list.Add(new("exported_provider_danger", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                        {
+                                                            exported.Add(item);
+                                                            exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                        }
+                                                    }
+                                                    else if (protlevel == "signature")
+                                                    {
+                                                        ret_list.Add(new("exported_provider_signature", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    }
+                                                    else if (protlevel == "signatureOrSystem")
+                                                    {
+                                                        ret_list.Add(new("exported_provider_signatureorsystem", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    ret_list.Add(new("exported_provider_unknown", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                if (!perm_appl_level_exists)
+                                                {
+                                                    ret_list.Add(new("exported_provider", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                }
+                                                else
+                                                {
+                                                    perm = "<strong>Permission: </strong>" + perm_appl_level;
+                                                    prot = "";
+                                                    if (permission_dict.ContainsKey(perm_appl_level))
+                                                    {
+                                                        prot = "<strong>protectionLevel: </strong>" + permission_dict[perm_appl_level];
+                                                        protlevel = permission_dict[perm_appl_level];
+                                                        prot_level_exist = true;
+                                                    }
+                                                    if (prot_level_exist)
+                                                    {
+                                                        if (protlevel == "normal")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_normal_app", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                            {
+                                                                exported.Add(item);
+                                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                            }
+                                                        }
+                                                        else if (protlevel == "dangerous")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_danger_appl", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                            {
+                                                                exported.Add(item);
+                                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                            }
+                                                        }
+                                                        else if (protlevel == "signature")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_signature_appl", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        }
+                                                        else if (protlevel == "signatureOrSystem")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_signatureorsystem_app", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        ret_list.Add(new("exported_provider_unknown_app", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+
+                                            }
+                                        }
+                                        else
+                                        {
+                                            if (itemname == "Content Provider" && Convert.ToInt32(min_sdk) >= 17)
+                                            {
+                                                perm = "";
+                                                item = node.GetAttribute($"{ns}:name");
+                                                if (!string.IsNullOrEmpty(node.GetAttribute($"{ns}:permission")))
+                                                {
+                                                    perm = "<strong>protectionLevel: </strong>" + permission_dict[node.GetAttribute($"{ns}:permission")];
+                                                    is_perm_exist = true;
+                                                }
+                                                if (is_perm_exist)
+                                                {
+                                                    prot = "";
+                                                    if (permission_dict.ContainsKey(node.GetAttribute($"{ns}:permission")))
+                                                    {
+                                                        prot = "<strong>protectionLevel: </strong>" + permission_dict[node.GetAttribute($"{ns}:permission")];
+                                                        protlevel = permission_dict[perm_appl_level];
+                                                        prot_level_exist = true;
+                                                    }
+                                                    if (prot_level_exist)
+                                                    {
+                                                        if (protlevel == "normal")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_normal_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                            {
+                                                                exported.Add(item);
+                                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                            }
+                                                        }
+                                                        else if (protlevel == "dangerous")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_danger_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                            {
+                                                                exported.Add(item);
+                                                                exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                            }
+                                                        }
+                                                        else if (protlevel == "signature")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_signature_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        }
+                                                        else if (protlevel == "signatureOrSystem")
+                                                        {
+                                                            ret_list.Add(new("exported_provider_signatureorsystem_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        ret_list.Add(new("exported_provider_unknown_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    if (!perm_appl_level_exists)
+                                                    {
+                                                        ret_list.Add(new("exported_provider_2", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                        exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                    }
+                                                    else
+                                                    {
+                                                        perm = "<strong>Permission: </strong>" + perm_appl_level;
+                                                        prot = "";
+                                                        if (permission_dict.ContainsKey(perm_appl_level))
+                                                        {
+                                                            prot = "<strong>Permission: </strong>" + permission_dict[perm_appl_level];
+                                                            prot_level_exist = true;
+                                                            protlevel = permission_dict[perm_appl_level];
+                                                        }
+
+                                                        if (prot_level_exist)
+                                                        {
+                                                            if (protlevel == "normal")
+                                                            {
+                                                                ret_list.Add(new("exported_provider_normal_app_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                                {
+                                                                    exported.Add(item);
+                                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                                }
+                                                            }
+                                                            else if (protlevel == "dangerous")
+                                                            {
+                                                                ret_list.Add(new("exported_provider_danger_app_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                                if (new[] { "Activity", "Activity-Alias" }.Contains(itemname))
+                                                                {
+                                                                    exported.Add(item);
+                                                                    exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                                }
+                                                            }
+                                                            else if (protlevel == "signature")
+                                                            {
+                                                                ret_list.Add(new("exported_provider_signature_app_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            }
+                                                            else if (protlevel == "signatureOrSystem")
+                                                            {
+                                                                ret_list.Add(new("exported_provider_signatureorsystem_app_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            ret_list.Add(new("exported_provider_unknown_app_new", [itemname, item, perm + prot, an_or_a, itemname]));
+                                                            exp_count[cnt_id] = exp_count[cnt_id] + 1;
+                                                        }
+                                                    }
+
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception)
+                                {
+
+                                }
+                            }
+                        }
+                    }
+                }
+
+                #endregion application level
+            }
+
+            #endregion APPLICATIONS Handle multiple application tags in AAR
+
+            #region GRANT-URI-PERMISSIONS
+            foreach (XmlElement granturi in grantUriPermission)
+            {
+                if (granturi.GetAttribute($"{ns}:pathPrefix") == "/")
+                {
+                    ret_list.Add(new("improper_provider_permission", ["pathPrefix=/", "", "", "", ""]));
+                }
+                else if (granturi.GetAttribute($"{ns}:path") == "/")
+                {
+                    ret_list.Add(new("improper_provider_permission", ["path=/", "", "", "", ""]));
+                }
+                else if (granturi.GetAttribute($"{ns}:pathPattern") == "*")
+                {
+                    ret_list.Add(new("improper_provider_permission", ["pathPattern=*", "", "", "", ""]));
+                }
+            }
+            #endregion GRANT-URI-PERMISSIONS
+            #region DATA
+            foreach (XmlElement data in dataTags)
+            {
+                if (data.GetAttribute($"{ns}:scheme") == "android_secret_code")
+                {
+                    string xmlhost = data.GetAttribute($"{ns}:port");
+                    ret_list.Add(new("dialer_code_found", [xmlhost, "", "", "", ""]));
+                }
+                else if (!string.IsNullOrEmpty(data.GetAttribute($"{ns}:port")))
+                {
+                    string dataport = data.GetAttribute($"{ns}:port");
+                    ret_list.Add(new("sms_receiver_port_found", [dataport, "", "", "", ""]));
+                }
+            }
+            #endregion DATA
+
+            #region INTENTS
+            foreach (XmlElement intent in intentFilter)
+            {
+                try
+                {
+                    if (Convert.ToInt32(intent.GetAttribute($"{ns}:scheme")) > 100)
+                    {
+                        ret_list.Add(new("high_intent_priority_found", [intent.GetAttribute($"{ns}:scheme"), "", "", "", ""]));
+                    }
+                }
+                catch (Exception) { }
+
+            }
+            #endregion DATA
+
+            #region ACTIONS
+            foreach (XmlElement actio in action)
+            {
+                try
+                {
+                    if (Convert.ToInt32(actio.GetAttribute($"{ns}:priority")) > 100)
+                    {
+                        ret_list.Add(new("high_action_priority_found", [actio.GetAttribute($"{ns}:scheme"), "", "", "", ""]));
+                    }
+                }
+                catch (Exception) { }
+
+            }
+            #endregion ACTIONS
+            List<RetValues> retValues = [];
+            foreach (var item in ret_list)
+            {
+
+                retValues.Add(new RetValues()
+                {
+                    Rule = item.Key,
+                    Title = item.Title,
+                    Severity = item.Level,
+                    Description = item.Description,
+                    Name = item.Name,
+                    Component = item.Name,
+                });
+            }
+            Dictionary<string, object> exported_comp = new Dictionary<string, object>();
+            exported_comp.Add("exported_activities", exp_count["act"]);
+            exported_comp.Add("exported_services", exp_count["ser"]);
+            exported_comp.Add("exported_receivers", exp_count["bro"]);
+            exported_comp.Add("exported_providers", exp_count["cnt"]);
+
+            retValues = retValues.DistinctBy(a => a.Title).ToList();
+            try
+            {
+                browsable_Activities = browsable_Activities.Where(a => ((List<string>)a.properties["schemes"]).Count > 0).ToList();
+            }
+            catch (Exception)
+            {
+            }
+            Dictionary<string, object> man_Dictionary = new Dictionary<string, object>();
+            man_Dictionary.Add("manifest_analysis", retValues);
+            man_Dictionary.Add("exported_act", exported);
+            man_Dictionary.Add("exported_cnt", exported_comp);
+            man_Dictionary.Add("browsable_activities", browsable_Activities);
+
+            var x = JsonSerializer.Serialize(retValues);
+            var y = JsonSerializer.Serialize(browsable_Activities);
+            return man_Dictionary;
+        }
+        public static Dictionary<string, object> GetBrowsableActivities(XmlElement node, string ns)
+        {
+            Dictionary<string, object> browseDic = new Dictionary<string, object>();
+            List<string> schemes = new List<string>();
+            List<string> mimeTypes = new List<string>();
+            List<string> hosts = new List<string>();
+            List<string> ports = new List<string>();
+            List<string> paths = new List<string>();
+            List<string> pathPrefixes = new List<string>();
+            List<string> pathPatterns = new List<string>();
+            Dictionary<string, string> wellKnown = new Dictionary<string, string>();
+            string wellKnownPath = "/.well-known/assetlinks.json";
+
+            try
+            {
+                // GetElementsByTagName equivalent
+                XmlNodeList catg = node.GetElementsByTagName("category");
+                foreach (XmlElement cat in catg)
+                {
+                    if (cat.GetAttribute($"{ns}:name") == "android.intent.category.BROWSABLE")
+                    {
+                        XmlNodeList dataTag = node.GetElementsByTagName("data");
+                        foreach (XmlElement data in dataTag)
+                        {
+                            string scheme = data.GetAttribute($"{ns}:scheme");
+                            if (!string.IsNullOrEmpty(scheme) && !schemes.Contains(scheme))
+                                schemes.Add(scheme);
+
+                            string mime = data.GetAttribute($"{ns}:mimeType");
+                            if (!string.IsNullOrEmpty(mime) && !mimeTypes.Contains(mime))
+                                mimeTypes.Add(mime);
+
+                            string host = data.GetAttribute($"{ns}:host");
+                            if (!string.IsNullOrEmpty(host) && !hosts.Contains(host))
+                                hosts.Add(host);
+
+                            string port = data.GetAttribute($"{ns}:port");
+                            if (!string.IsNullOrEmpty(port) && !ports.Contains(port))
+                                ports.Add(port);
+
+                            string path = data.GetAttribute($"{ns}:path");
+                            if (!string.IsNullOrEmpty(path) && !paths.Contains(path))
+                                paths.Add(path);
+
+                            string pathPrefix = data.GetAttribute($"{ns}:pathPrefix");
+                            if (!string.IsNullOrEmpty(pathPrefix) && !pathPrefixes.Contains(pathPrefix))
+                                pathPrefixes.Add(pathPrefix);
+
+                            string pathPattern = data.GetAttribute($"{ns}:pathPattern");
+                            if (!string.IsNullOrEmpty(pathPattern) && !pathPatterns.Contains(pathPattern))
+                                pathPatterns.Add(pathPattern);
+
+                            // Collect well-known paths
+                            if (!string.IsNullOrEmpty(scheme) && (scheme == "http" || scheme == "https")
+                                && !string.IsNullOrEmpty(host) && host != "*")
+                            {
+                                host = host.Replace("*.", "").Replace("#", "");
+                                if (IsValidHost(host))
+                                {
+                                    string shost = $"{scheme}://{host}";
+                                    string cUrl = !string.IsNullOrEmpty(port) && IsNumber(port) ?
+                                        $"{shost}:{port}{wellKnownPath}" :
+                                        $"{shost}{wellKnownPath}";
+
+                                    if (!wellKnown.ContainsKey(cUrl))
+                                        wellKnown.Add(cUrl, shost);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Append '://' to each scheme
+                schemes = schemes.ConvertAll(scheme => scheme + "://");
+
+                // Populate dictionary with collected data
+                browseDic["schemes"] = schemes;
+                browseDic["mime_types"] = mimeTypes;
+                browseDic["hosts"] = hosts;
+                browseDic["ports"] = ports;
+                browseDic["paths"] = paths;
+                browseDic["path_prefixes"] = pathPrefixes;
+                browseDic["path_patterns"] = pathPatterns;
+                browseDic["browsable"] = schemes.Count > 0; // Check if schemes list is not empty
+                browseDic["well_known"] = wellKnown;
+
+                return browseDic;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception: {ex.Message}");
+                throw; // Propagate the exception
+            }
+        }
+        static bool IsNumber(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return false;
+
+            if (s == "NaN")
+                return false;
+
+            // Check using standard float parsing
+            if (float.TryParse(s, out float floatResult))
+                return true;
+
+            // Check using Unicode numeric parsing
+            try
+            {
+                double unicodeNumeric = char.GetNumericValue(s, 0);
+                if (!double.IsNaN(unicodeNumeric))
+                    return true;
+            }
+            catch (ArgumentException)
+            {
+                // Handle ArgumentException if char.GetNumericValue fails
+            }
+
+            return false;
+        }
+        static bool IsValidHost(string host)
+        {
+            try
+            {
+                // Check if host starts with valid prefixes
+                string[] validPrefixes = { "http://", "https://" };
+                if (!validPrefixes.Any(prefix => host.StartsWith(prefix)))
+                {
+                    host = "http://" + host; // Add default prefix if missing
+                }
+
+                // Parse the URI to extract components
+                Uri uri = new Uri(host);
+
+                // Get domain and path components
+                string domain = uri.Host;
+                string path = uri.AbsolutePath;
+
+                // Check if domain is empty or path is not empty
+                if (string.IsNullOrEmpty(domain) || !string.IsNullOrEmpty(path))
+                {
+                    return false;
+                }
+
+                // Check for IPv6 address (not supported in this simplified example)
+                // IPv6 check could be more complex and may require additional handling
+
+                // Check against list of invalid prefixes and local network identifiers
+                string[] invalidPrefixes = {
+                "100.64.", "127.", "192.", "198.", "10.", "172.", "169.", "0.",
+                "203.0.", "224.0.", "240.0", "255.255.", "localhost", "::1",
+                "64::ff9b::", "100::", "2001::", "2002::", "fc00::", "fe80::", "ff00::"
+            };
+
+                if (invalidPrefixes.Any(prefix => domain.StartsWith(prefix)))
+                {
+                    return false;
+                }
+
+                // Attempt to resolve the domain to an IP address and check again
+                IPAddress ipAddress;
+                if (IPAddress.TryParse(domain, out ipAddress))
+                {
+                    if (invalidPrefixes.Any(prefix => ipAddress.ToString().StartsWith(prefix)))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    ipAddress = Dns.GetHostAddresses(domain).FirstOrDefault();
+                    if (ipAddress != null && invalidPrefixes.Any(prefix => ipAddress.ToString().StartsWith(prefix)))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+         
+    }
+    public class ManifestData
+    {
+        public List<string> Services { get; set; }
+        public List<string> Activities { get; set; }
+        public List<string> Receivers { get; set; }
+        public List<string> Providers { get; set; }
+        public List<string> Libraries { get; set; }
+        public List<string> Categories { get; set; }
+        public Dictionary<string, object> permission { get; set; }
+        public string PackageName { get; set; }
+        public string MainActivity { get; set; }
+        public string MinSdk { get; set; }
+        public string MaxSdk { get; set; }
+        public string TargetSdk { get; set; }
+        public string VersionCode { get; set; }
+        public string VersionName { get; set; }
+        public List<string> Icons { get; set; }
+    }
+
+}
+public class browsable_activities
+{
+    public string key { get; set; }
+    public Dictionary<string, object> properties { get; set; }
+}
+public class RetValues
+{
+    public string Rule { get; set; }
+    public string Title { get; set; }
+    public string Severity { get; set; }
+    public string Description { get; set; }
+    public string Name { get; set; }
+    public Object Component { get; set; }
+
+}
+
+public class ManifestDescription
+{
+    public string Title { get; set; }
+    public string Level { get; set; }
+    public string Description { get; set; }
+    public string Name { get; set; }
+    public string Key { get; set; }
+
+    public ManifestDescription(string name, params string[] args)
+    {
+        switch (name)
+        {
+            case "well_known_assetlinks":
+                Key = name;
+                Key = name; Title = $"App Link assetlinks.json file not found<br>[android:name={args[0]}]<br>[android:host={args[1]}]";
+                Level = "high";
+                Description = $"App Link asset verification URL ({args[0]}) not found or configured incorrectly. (Status Code: {args[1]}). App Links allow users to redirect from a web URL/email to the mobile app. If this file is missing or incorrectly configured for the App Link host/domain, a malicious app can hijack such URLs. This may lead to phishing attacks, leak sensitive data in the URI, such as PII, OAuth tokens, magic link/password reset tokens and more. You must verify the App Link domain by hosting the assetlinks.json file and enabling verification via [android:autoVerify=\"true\"] in the Activity intent-filter.";
+                Name = $"App Link assetlinks.json file not found [android:name={args[0]}], [android:host={args[1]}]";
+                break;
+            case "clear_text_traffic":
+                Key = name;
+                Title = "Clear text traffic is Enabled For App<br>[android:usesCleartextTraffic=true]";
+                Level = "high";
+                Description = "The app intends to use cleartext network traffic, such as cleartext HTTP, FTP stacks, DownloadManager, and MediaPlayer. The default value for apps that target API level 27 or lower is \"true\". Apps that target API level 28 or higher default to \"false\". The key reason for avoiding cleartext traffic is the lack of confidentiality, authenticity, and protections against tampering; a network attacker can eavesdrop on transmitted data and also modify it without being detected.";
+                Name = "Clear text traffic is Enabled For App [android:usesCleartextTraffic=true]";
+                break;
+            case "direct_boot_aware":
+                Key = name;
+                Title = "App is direct-boot aware <br>[android:directBootAware=true]";
+                Level = "info";
+                Description = "This app can run before the user unlocks the device. If you're using a custom subclass of Application, and if any component inside your application is direct-boot aware, then your entire custom application is considered to be direct-boot aware. During Direct Boot, your application can only access the data that is stored in device protected storage.";
+                Name = "App is direct-boot aware [android:directBootAware=true]";
+                break;
+            case "has_network_security":
+                Key = name;
+                Key = name; Title = $"App has a Network Security Configuration<br>[android:networkSecurityConfig={args[0]}]";
+                Level = "info";
+                Description = "The Network Security Configuration feature lets apps customize their network security settings in a safe, declarative configuration file without modifying app code. These settings can be configured for specific domains and for a specific app.";
+                Name = $"App has a Network Security Configuration [android:networkSecurityConfig={args[0]}]";
+                break;
+            case "vulnerable_os_version":
+                Key = name;
+                Key = name; Title = $"App can be installed on a vulnerable unpatched Android version<br>Android {args[0]}, [min_sdk={args[1]}]";
+                Level = "high";
+                Description = "This application can be installed on an older version of android that has multiple unfixed vulnerabilities. These devices won't receive reasonable security updates from Google. Support an Android version => 10, API 29 to receive reasonable security updates.";
+                Name = $"App can be installed on a vulnerable unpatched Android version {args[0]}, [min_sdk={args[1]}]";
+                break;
+            case "vulnerable_os_version2":
+                Key = name;
+                Key = name; Title = $"App can be installed on a vulnerable Android version<br>Android {args[0]}, min_sdk={args[1]}]";
+                Level = "warning";
+                Description = "This application can be installed on an older version of android that has multiple vulnerabilities. Support an Android version => 10, API 29 to receive reasonable security updates.";
+                Name = $"App can be installed on a vulnerable Android version {args[0]}, [min_sdk={args[1]}]";
+                break;
+            case "app_is_debuggable":
+                Key = name;
+                Title = "Debug Enabled For App<br>[android:debuggable=true]";
+                Level = "high";
+                Description = "Debugging was enabled on the app which makes it easier for reverse engineers to hook a debugger to it. This allows dumping a stack trace and accessing debugging helper classes.";
+                Name = "Debug Enabled For App [android:debuggable=true]";
+                break;
+            case "app_allowbackup":
+                Key = name;
+                Title = "Application Data can be Backed up<br>[android:allowBackup=true]";
+                Level = "warning";
+                Description = "This flag allows anyone to backup your application data via adb. It allows users who have enabled USB debugging to copy application data off of the device.";
+                Name = "Application Data can be Backed up [android:allowBackup=true]";
+                break;
+            case "app_in_test_mode":
+                Key = name;
+                Title = "Application is in Test Mode <br>[android:testOnly=true]";
+                Level = "high";
+                Description = "It may expose functionality or data outside of itself that would cause a security hole.";
+                Name = "Application is in Test Mode [android:testOnly=true]";
+                break;
+            case "task_affinity_set":
+                Key = name;
+                Title = string.Format("TaskAffinity is set for activity <br>({0})", args[0]);
+                Level = "warning";
+                Description = "If taskAffinity is set, then other application could read the Intents sent to Activities belonging to another task. Always use the default setting keeping the affinity as the package name in order to prevent sensitive information inside sent or received Intents from being read by another application.";
+                Name = string.Format("TaskAffinity is set for Activity ({0})", args[0]);
+                break;
+            case "non_standard_launchmode":
+                Key = name;
+                Title = string.Format("Launch Mode of activity ({0}) is not standard.", args[0]);
+                Level = "warning";
+                Description = "An Activity should not be having the launch mode attribute set to 'singleTask/singleInstance' as it becomes root Activity and it is possible for other applications to read the contents of the calling Intent. So it is required to use the 'standard' launch mode attribute when sensitive information is included in an Intent.";
+                Name = string.Format("Launch Mode of activity ({0}) is not standard.", args[0]);
+                break;
+            case "task_hijacking":
+                Key = name;
+                Title = string.Format("Activity ({0}) is vulnerable to Android Task Hijacking/StrandHogg.", args[0]);
+                Level = "high";
+                Description = "An Activity should not be having the launch mode attribute set to 'singleTask'. It is then possible for other applications to place a malicious activity on top of the activity stack resulting in Task Hijacking/StrandHogg 1.0 vulnerability. This makes the application an easy target for phishing attacks. The vulnerability can be remediated by setting the launch mode attribute to 'singleInstance' or by setting an empty taskAffinity (taskAffinity=\"\"). You can also update the target SDK version (" + args[1] + ") of the app to 28 or higher to fix this issue at platform level.";
+                Name = string.Format("Activity ({0}) is vulnerable to Android Task Hijacking/StrandHogg.", args[0]);
+                break;
+            case "task_hijacking2":
+                Key = name;
+                Title = string.Format("Activity ({0}) is vulnerable to StrandHogg 2.0", args[0]);
+                Level = "high";
+                Description = "Activity is found to be vulnerable to StrandHogg 2.0 task hijacking vulnerability. When vulnerable, it is possible for other applications to place a malicious activity on top of the activity stack of the vulnerable application. This makes the application an easy target for phishing attacks. The vulnerability can be remediated by setting the launch mode attribute to 'singleInstance' and by setting an empty taskAffinity (taskAffinity=\"\"). You can also update the target SDK version (" + args[1] + ") of the app to 29 or higher to fix this issue at platform level.";
+                Name = string.Format("Activity ({0}) is vulnerable to StrandHogg 2.0", args[0]);
+                break;
+            case "improper_provider_permission":
+                Key = name;
+                Title = "Improper Content Provider permission<br>[" + args[0] + "]";
+                Level = "warning";
+                Description = "A content provider permission was set to allows access from any other app on the device. Content providers may contain sensitive information about an app and therefore should not be shared.";
+                Name = "Improper Content Provider permission";
+                break;
+            case "dialer_code_found":
+                Key = name;
+                Title = string.Format("Dailer Code: {0} Found <br>[android:scheme=\"android_secret_code\"]", args[0]);
+                Level = "warning";
+                Description = "A secret code was found in the manifest. These codes, when entered into the dialer grant access to hidden content that may contain sensitive information.";
+                Name = string.Format("Dailer Code: {0} Found. [android:scheme=\"android_secret_code\"]", args[0]);
+                break;
+            case "sms_receiver_port_found":
+                Key = name;
+                Title = string.Format("Data SMS Receiver Set on Port: {0} Found<br>[android:port]", args[0]);
+                Level = "warning";
+                Description = "A binary SMS receiver is configured to listen on a port. Binary SMS messages sent to a device are processed by the application in whichever way the developer choses. The data in this SMS should be properly validated by the application. Furthermore, the application should assume that the SMS being received is from an untrusted source.";
+                Name = string.Format("Data SMS Receiver Set on Port: {0} Found. [android:port]", args[0]);
+                break;
+            case "high_intent_priority_found":
+                Key = name;
+                Title = string.Format("High Intent Priority ({0})<br>[android:priority]", args[0]);
+                Level = "warning";
+                Description = "By setting an intent priority higher than another intent, the app effectively overrides other requests.";
+                Name = string.Format("High Intent Priority ({0}). [android:priority]", args[0]);
+                break;
+            case "high_action_priority_found":
+                Key = name;
+                Title = string.Format("High Action Priority ({0})<br>[android:priority]", args[0]);
+                Level = "warning";
+                Description = "By setting an action priority higher than another action, the app effectively overrides other requests.";
+                Name = string.Format("High Action Priority ({0}). [android:priority]", args[0]);
+                break;
+            case "exported_protected_permission_signature":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission.<br>{2}<br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "info";
+                Description = string.Format("A{0} {1} is found to be exported, but is protected by a permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_normal":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission. However, the protection level of the permission is set to normal. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_dangerous":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission. However, the protection level of the permission is set to dangerous. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_signatureorsystem":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "info";
+                Description = string.Format("A{0} {1} is found to be exported, but is protected by a permission. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_not_defined":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_normal_app_level":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at the application level. However, the protection level of the permission is set to normal. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_dangerous_app_level":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at the application level. However, the protection level of the permission is set to dangerous. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1})  Protected by a permission at the application level.<br>{2}<br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "info";
+                Description = string.Format("A{0} {1} is found to be exported, but is protected by a permission at the application level.", args[0], args[1]);
+                Name = string.Format("{0} {1} Protected by a permission at the application level. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_signatureorsystem_app_level":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "info";
+                Description = string.Format("A{0} {1} is found to be exported, but is protected by a permission at the application level. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "exported_protected_permission_app_level":
+                Key = name;
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application, but the protection level of the permission should be checked.<br>{2} <br>[android:exported=true]", args[0], args[1], args[2]);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at the application level which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.", args[0], args[1]);
+                Name = string.Format("{0} {1} is Protected by a permission at the application, but the protection level of the permission should be checked. [{2}] [android:exported=true]", args[0], args[1], args[2]);
+                break;
+            case "explicitly_exported":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is not Protected. <br>[android:exported=true]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device.";
+                Name = $"{args[0]} {args[1]} is not Protected. [android:exported=true]";
+                break;
+            case "exported_intent_filter_exists":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is not Protected.<br>An intent-filter exists.";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. The presence of intent-filter indicates that the {args[4]} is explicitly exported.";
+                Name = $"{args[0]} {args[1]} is not Protected. An intent-filter exists.";
+                break;
+            case "exported_provider":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is not Protected. <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is a Content Provider that targets an API level under 17, which makes it exported by default, regardless of the API level of the system that the application runs on.";
+                Name = $"{args[0]} {args[1]} is not Protected. [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_2":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) would not be Protected if the application ran on a device where the the API level was less than 17. <br>[Content Provider, targetSdkVersion >= 17]";
+                Level = "warning";
+                Description = $"The Content Provider({args[2]} {args[3]}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would be shared with other apps on the device therefore leaving it accessible to any other application on the device.";
+                Name = $"{args[0]} {args[1]} would not be Protected if the application ran on a device where the the API level was less than 17. [Content Provider, targetSdkVersion >= 17]";
+                break;
+            case "exported_provider_normal":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission. However, the protection level of the permission is set to normal. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_danger":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission. However, the protection level of the permission is set to dangerous. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_signature":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "info";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_signatureorsystem":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "info";
+                Description = $"A{args[2]} {args[3]} is found to be exported, but is protected by a permission. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_unknown":
+                Key = name;
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_normal_app":
+                Key = name; Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at the application level. However, the protection level of the permission is set to normal. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_danger_appl":
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "warning";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at the application level. However, the protection level of the permission is set to dangerous. This means that a malicious application can request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_signature_appl":
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission at the application level.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "info";
+                Description = $"A{args[2]} {args[3]} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by permission at the application level.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission at the application level. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_signatureorsystem_app":
+                Key = name; Title = $"<strong>{args[0]}</strong> ({args[1]}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{args[2]} <br>[Content Provider, targetSdkVersion < 17]";
+                Level = "info";
+                Description = $"A{args[2]} {args[3]} is found to be exported, but is protected by a permission at the application level. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.";
+                Name = $"{args[0]} {args[1]} is Protected by a permission at the application level, but the protection level of the permission should be checked. [{args[2]}] [Content Provider, targetSdkVersion < 17]";
+                break;
+            case "exported_provider_unknown_app":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at application level, but the protection level of the permission should be checked.<br>{2} <br>[Content Provider, targetSdkVersion < 17]", args);
+                Level = "warning";
+                Description = string.Format("A{0} {1} is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. It is protected by a permission at application level which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at application level, but the protection level of the permission should be checked. [{2}] [Content Provider, targetSdkVersion < 17]", args);
+                break;
+            case "exported_provider_normal_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider ({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to normal. This means that a malicious application could request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17 [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_danger_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the API level is less than 17.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to dangerous. This means that a malicious application could request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the API level is less than 17. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_signature_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "info";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. Nevertheless, it is protected by a permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_signatureorsystem_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "info";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.", args);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_unknown_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_normal_app_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider ({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to normal. This means that a malicious application could request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level should be checked, but the protection level of the permission if the application runs on a device where the the API level is less than 17. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_danger_app_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to dangerous. This means that a malicious application could request and obtain the permission and interact with the component. If it was set to signature, only applications signed with the same certificate could obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_signature_app_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level.<br>{2}<br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "info";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. Nevertheless, it is protected by a permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_signatureorsystem_app_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "info";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the API level was less than 17. In that situation, it would still be protected by a permission. However, the protection level of the permission is set to signatureOrSystem. It is recommended that signature level is used instead. Signature level should suffice for most purposes, and does not depend on where the applications are installed on the device.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level but the protection level of the permission should be checked. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "exported_provider_unknown_app_new":
+                Title = string.Format("<strong>{0}</strong> ({1}) is Protected by a permission at the application level, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17.<br>{2} <br>[Content Provider, targetSdkVersion >= 17]", args);
+                Level = "warning";
+                Description = string.Format("The Content Provider({0}) would be exported if the application ran on a device where the the API level was less than 17. In that situation, it would still be protected by a permission which is not defined in the analysed application. As a result, the protection level of the permission should be checked where it is defined. If it is set to normal or dangerous, a malicious application can request and obtain the permission and interact with the component. If it is set to signature, only applications signed with the same certificate can obtain the permission.", args);
+                Name = string.Format("{0} {1} is Protected by a permission at the application level, but the protection level of the permission should be checked if the application runs on a device where the the API level is less than 17. [{2}] [Content Provider, targetSdkVersion >= 17]", args);
+                break;
+            case "allowbackup_not_set":
+                Title = string.Format("Application Data can be Backed up<br>[android:allowBackup] flag is missing.", args);
+                Level = "warning";
+                Description = string.Format("The flag [android:allowBackup] should be set to false. By default it is set to true and allows anyone to backup your application data via adb. It allows users who have enabled USB debugging to copy application data off of the device.", args);
+                Name = string.Format("Application Data can be Backed up [android:allowBackup] flag is missing.", args);
+                break;
+            default:
+                throw new ArgumentException("Unknown description name");
+        }
+    }
+}
+public static class AndroidConstants
+{
+    public const int ANDROID_4_2_LEVEL = 17;
+    public const int ANDROID_5_0_LEVEL = 21;
+    public const int ANDROID_8_0_LEVEL = 26;
+    public const int ANDROID_9_0_LEVEL = 28;
+    public const int ANDROID_10_0_LEVEL = 29;
+    public const string ANDROID_MANIFEST_FILE = "AndroidManifest.xml";
+
+    public static readonly Dictionary<string, string> ANDROID_API_LEVEL_MAP = new Dictionary<string, string>
+    {
+        { "1", "1.0" },
+        { "2", "1.1" },
+        { "3", "1.5" },
+        { "4", "1.6" },
+        { "5", "2.0-2.1" },
+        { "8", "2.2-2.2.3" },
+        { "9", "2.3-2.3.2" },
+        { "10", "2.3.3-2.3.7" },
+        { "11", "3.0" },
+        { "12", "3.1" },
+        { "13", "3.2-3.2.6" },
+        { "14", "4.0-4.0.2" },
+        { "15", "4.0.3-4.0.4" },
+        { "16", "4.1-4.1.2" },
+        { "17", "4.2-4.2.2" },
+        { "18", "4.3-4.3.1" },
+        { "19", "4.4-4.4.4" },
+        { "20", "4.4W-4.4W.2" },
+        { "21", "5.0-5.0.2" },
+        { "22", "5.1-5.1.1" },
+        { "23", "6.0-6.0.1" },
+        { "24", "7.0" },
+        { "25", "7.1-7.1.2" },
+        { "26", "8.0" },
+        { "27", "8.1" },
+        { "28", "9" },
+        { "29", "10" },
+        { "30", "11" },
+        { "31", "12" },
+        { "32", "12L" },
+        { "33", "13" },
+        { "34", "14" }
+    };
+}
+
+public class AssetLinkResult
+{
+    public string Url { get; set; }
+    public string Host { get; set; }
+    public int? StatusCode { get; set; }
+    public bool Status { get; set; }
+}
+internal class ManifestDataExtractor
+{
+    internal Dictionary<string, object> ManifestData(XmlDocument mfxml, string ns = "android")
+    {
+        try
+        {
+            Console.WriteLine("Extracting Manifest Data");
+            List<string> svc = new List<string>();
+            List<string> act = new List<string>();
+            List<string> brd = new List<string>();
+            List<string> cnp = new List<string>();
+            List<string> lib = new List<string>();
+            List<string> perm = new List<string>();
+            List<string> cat = new List<string>();
+            List<string> icons = new List<string>();
+            Dictionary<string, object> dvm_perm = new Dictionary<string, object>();
+            string package = "";
+            string minsdk = "";
+            string maxsdk = "";
+            string targetsdk = "";
+            string mainact = "";
+            string androidversioncode = "";
+            string androidversionname = "";
+
+            XmlNodeList applications = mfxml.GetElementsByTagName("application");
+            XmlNodeList permissions = mfxml.GetElementsByTagName("uses-permission");
+            XmlNodeList permsdk23 = mfxml.GetElementsByTagName("uses-permission-sdk-23");
+
+            // Iterate over permsdk23 nodes and add them to permissions list
+            foreach (XmlNode node in permsdk23)
+            {
+                XmlNode clonedNode = node.CloneNode(true); // Clone the node to detach it from its original context
+                                                           //permissions.(clonedNode); // Add the cloned node to the permissions list
+            }
+
+            XmlNodeList manifest = mfxml.GetElementsByTagName("manifest");
+            XmlNodeList activities = mfxml.GetElementsByTagName("activity");
+            XmlNodeList services = mfxml.GetElementsByTagName("service");
+            XmlNodeList providers = mfxml.GetElementsByTagName("provider");
+            XmlNodeList receivers = mfxml.GetElementsByTagName("receiver");
+            XmlNodeList libs = mfxml.GetElementsByTagName("uses-library");
+            XmlNodeList sdk = mfxml.GetElementsByTagName("uses-sdk");
+            XmlNodeList categories = mfxml.GetElementsByTagName("category");
+
+            foreach (XmlNode node in sdk)
+            {
+                minsdk = node.Attributes[$"{ns}:minSdkVersion"].Value;
+                maxsdk = node.Attributes[$"{ns}:maxSdkVersion"]?.Value ?? maxsdk;
+                targetsdk = node.Attributes[$"{ns}:targetSdkVersion"]?.Value ?? node.Attributes[$"{ns}:minSdkVersion"].Value;
+            }
+
+            foreach (XmlNode node in manifest)
+            {
+                package = node.Attributes["package"].Value;
+                androidversioncode = node.Attributes[$"{ns}:versionCode"].Value;
+                androidversionname = node.Attributes[$"{ns}:versionName"].Value;
+            }
+
+            string alt_main = "";
+            foreach (XmlNode activity in activities)
+            {
+                string act_2 = activity.Attributes[$"{ns}:name"].Value;
+                act.Add(act_2);
+                if (mainact == "")
+                {
+                    foreach (XmlNode sitem in activity.SelectNodes("action"))
+                    {
+                        string val = sitem.Attributes[$"{ns}:name"].Value;
+                        if (val == "android.intent.action.MAIN")
+                        {
+                            mainact = activity.Attributes[$"{ns}:name"].Value;
+                        }
+                    }
+                    foreach (XmlNode sitem in activity.SelectNodes("category"))
+                    {
+                        string val = sitem.Attributes[$"{ns}:name"].Value;
+                        if (val == "android.intent.category.LAUNCHER")
+                        {
+                            alt_main = activity.Attributes[$"{ns}:name"].Value;
+                        }
+                    }
+                }
+            }
+            if (mainact == "" && alt_main != "")
+            {
+                mainact = alt_main;
+            }
+
+            foreach (XmlNode service in services)
+            {
+                string service_name = service.Attributes[$"{ns}:name"].Value;
+                svc.Add(service_name);
+            }
+
+            foreach (XmlNode provider in providers)
+            {
+                string provider_name = provider.Attributes[$"{ns}:name"].Value;
+                cnp.Add(provider_name);
+            }
+
+            foreach (XmlNode receiver in receivers)
+            {
+                string rec = receiver.Attributes[$"{ns}:name"].Value;
+                brd.Add(rec);
+            }
+
+            foreach (XmlNode _lib in libs)
+            {
+                string library = _lib.Attributes[$"{ns}:name"].Value;
+                lib.Add(library);
+            }
+
+            foreach (XmlNode category in categories)
+            {
+                string category_name = category.Attributes[$"{ns}:name"].Value;
+                cat.Add(category_name);
+            }
+
+            foreach (XmlNode application in applications)
+            {
+                string icon_path = application.Attributes[$"{ns}:icon"]?.Value;
+                if (icon_path != null)
+                {
+                    icons.Add(icon_path);
+                }
+            }
+
+            string[] android_permission_tags = { "com.google.", "android.", "com.google." };
+            foreach (XmlNode permission in permissions)
+            {
+                string full_perm = permission.Attributes[$"{ns}:name"].Value;
+                perm.Add(full_perm);
+                string prm = full_perm.Substring(full_perm.LastIndexOf('.') + 1);
+                if (!android_permission_tags.Any(substring => full_perm.StartsWith(substring)))
+                {
+                    prm = full_perm;
+                }
+                try
+                {
+                    if (DVM_PERMISSIONS["MANIFEST_PERMISSION"][prm] != null)
+                    {
+                        dvm_perm[full_perm] = DVM_PERMISSIONS["MANIFEST_PERMISSION"][prm];
+                    }
+                }
+                catch (KeyNotFoundException)
+                {
+                    try
+                    {
+                        if (DVM_PERMISSIONS["SPECIAL_PERMISSIONS"][full_perm] != null)
+                        {
+                            dvm_perm[full_perm] = DVM_PERMISSIONS["SPECIAL_PERMISSIONS"][full_perm];
+                        }
+                        else
+                        {
+                            dvm_perm[full_perm] = new object[] { "unknown", "Unknown permission", "Unknown permission from android reference" };
+                        }
+                    }
+                    catch (Exception)
+                    {
+
+                    }
+                }
+            }
+
+            Dictionary<string, object> man_data_dic = new Dictionary<string, object>()
+            {
+                { "services", svc },
+                { "activities", act },
+                { "receivers", brd },
+                { "providers", cnp },
+                { "libraries", lib },
+                { "categories", cat },
+                { "perm", dvm_perm },
+                { "packagename", package },
+                { "mainactivity", mainact },
+                { "min_sdk", minsdk },
+                { "max_sdk", maxsdk },
+                { "target_sdk", targetsdk },
+                { "androver", androidversioncode },
+                { "androvername", androidversionname },
+                { "icons", icons }
+            };
+
+            return man_data_dic;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error extracting Manifest Data: " + ex.Message);
+            throw;
+        }
+    }
+
+    private Dictionary<string, Dictionary<string, object>> DVM_PERMISSIONS = new Dictionary<string, Dictionary<string, object>>();
+}
